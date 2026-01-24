@@ -15,44 +15,42 @@ jobs:
           cd cf_st
           echo "🚀 正在获取 CloudflareSpeedTest 最新版本..."
 
-          # 1. 获取最新下载链接
+          # 获取最新下载链接
           LATEST_URL=$(curl -sL https://api.github.com/repos/XIU2/CloudflareSpeedTest/releases/latest | grep "browser_download_url" | grep "linux_amd64.tar.gz" | head -n 1 | cut -d '"' -f 4)
           
-          if [ -z "$LATEST_URL" ]; then
-            echo "❌ 错误：无法获取下载链接。"
-            exit 1
-          fi
-
-          echo "⬇️ 下载地址: $LATEST_URL"
+          # 下载
           wget -O cf_speedtest.tar.gz $LATEST_URL
-          
-          # 2. 解压
+          # 解压
           tar -zxf cf_speedtest.tar.gz
           
-          # 3. 🔴 核心修复：不猜文件名，直接通过文件大小找到主程序
-          # 先删除压缩包，防止干扰
+          # 自动识别主程序文件名并重命名
           rm cf_speedtest.tar.gz
-          
-          # 列出当前目录下所有文件，按大小排序(S)，取最大的一个(head -1)，即为主程序
-          # 无论它叫 cfst, cfst_linux_amd64 还是 CloudflareSpeedTest，统统抓出来
           MAIN_BIN=$(ls -S | head -n 1)
-          echo "🔍 自动检测到主程序文件名为: $MAIN_BIN"
-          
-          # 强制改名为脚本通用的名字
           mv "$MAIN_BIN" CloudflareSpeedTest
-          
-          # 4. 授予执行权限并运行
           chmod +x CloudflareSpeedTest
           
           echo "🚀 开始测速..."
-          # 参数: -tll 90 (延迟上限90ms) -sl 3 (速度下限3MB/s) -dn 5 (测5个)
-          ./CloudflareSpeedTest -tll 90 -sl 3 -dn 5 -o result.csv
+          # ---------------------------------------------------
+          # 🔴 关键修改：去掉了 -sl (速度限制) 和 -tll (延迟限制)
+          # -p 10 : 显示 10 个最快的 IP
+          # -dn 5 : 对前 5 个进行下载测速
+          # ---------------------------------------------------
+          ./CloudflareSpeedTest -p 10 -dn 5 -o result.csv
+
+          # 调试：打印当前目录文件，确保 result.csv 存在
+          ls -lh 
+
+          # 检查 result.csv 是否生成
+          if [ ! -f "result.csv" ]; then
+            echo "❌ 错误：result.csv 未生成。可能是所有 IP 都测速失败。"
+            exit 1
+          fi
           
-          # 5. 提取结果
+          # 提取最快 IP (跳过第一行标题，取第二行第一列)
           BEST_IP=$(sed -n '2p' result.csv | cut -d, -f1)
           
           if [ -z "$BEST_IP" ]; then
-            echo "⚠️ 未找到满足条件的 IP，本次跳过。"
+            echo "⚠️ 获取到的 IP 为空，本次跳过。"
             exit 0
           fi
           
