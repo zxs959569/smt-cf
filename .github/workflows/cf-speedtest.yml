@@ -2,33 +2,88 @@ name: Cloudflare 优选IP自动更新
 
 on:
   schedule:
-    - cron: '0 */4 * * *'  # 每4小时运行一次 (UTC时间)
-  workflow_dispatch:       # 允许手动点击运行
+    - cron: '0 */4 * * *'  # 每4小时执行一次
+  workflow_dispatch:       # 允许手动触发
 
 jobs:
-  update-dns:
+  speedtest-and-update:
     runs-on: ubuntu-latest
     steps:
-      - name: 检出代码
-        uses: actions/checkout@v3
+      - name: 1. 下载并运行 CloudflareSpeedTest
+        run: |
+          # 创建目录并下载 XIU2 的测速工具 (v2.2.5 是稳定版)
+          mkdir -p cf_st
+          cd cf_st
+          wget -N https://github.com/XIU2/CloudflareSpeedTest/releases/download/v2.2.5/CloudflareSpeedTest_linux_amd64.tar.gz
+          tar -zxf CloudflareSpeedTest_linux_amd64.tar.gz
+          chmod +x CloudflareSpeedTest
+          
+          echo "🚀 开始测速..."
+          # 参数说明:
+          # -tll 90: 平均延迟上限 90ms (防假墙)
+          # -sl 3: 下载速度下限 3MB/s (根据你的网络情况调整)
+          # -dn 5: 测速数量 5个
+          # -o result.csv: 输出结果到文件
+          ./CloudflareSpeedTest -tll 90 -sl 3 -dn 5 -o result.csv
+          
+          # 提取 csv 文件的第二行第一列 (即最快的那个 IP)
+          BEST_IP=$(sed -n '2p' result.csv | cut -d, -f1)
+          
+          if [ -z "$BEST_IP" ]; then
+            echo "⚠️ 未找到满足条件的 IP，本次跳过更新。"
+            exit 0
+          fi
+          
+          echo "✅ 测速完成，最佳 IP: $BEST_IP"
+          # 将最佳 IP 保存到环境变量，供下一步使用
+          echo "BEST_IP=$BEST_IP" >> $GITHUB_ENV
 
-      - name: 测速并更新 DNS
-        # 这里使用一个通用的测速 Action，你也可以换成其他的
-        uses: mack-a/v2ray-agent/gh-action/cf-speedtest@master
-        with:
-          # 必填：从 Secrets 读取 Token
-          api_token: ${{ secrets.CF_API_TOKEN }}
-          # 必填：从 Secrets 读取 Zone ID
-          zone_id: ${{ secrets.CF_ZONE_ID }}
+      - name: 2. 调用 API 更新 DNS 记录
+        env:
+          # 从 GitHub Secrets 读取敏感信息
+          CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+          CF_ZONE_ID: ${{ secrets.CF_ZONE_ID }}
+          # 你的优选域名
+          DOMAIN: "smt.zxs.cc.cd"
+        run: |
+          # 检查 IP 是否为空
+          if [ -z "$BEST_IP" ]; then
+            echo "没有 IP 需要更新"
+            exit 0
+          fi
+
+          echo "🔍 正在查询域名 $DOMAIN 的 DNS 记录 ID..."
           
-          # 你的完整域名 (要更新 A 记录的那个)
-          domain: "smt.zxs.cc.cd"
+          # 1. 先通过 API 查询域名的 Record ID
+          RECORD_INFO=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones/$CF_ZONE_ID/dns_records?name=$DOMAIN&type=A" \
+            -H "Authorization: Bearer $CF_API_TOKEN" \
+            -H "Content-Type: application/json")
           
-          # 记录类型
-          record_type: "A"
+          # 使用 jq 解析 JSON 获取 ID
+          RECORD_ID=$(echo "$RECORD_INFO" | jq -r '.result[0].id')
           
-          # 筛选参数：只选下载速度 > 10MB/s 的 IP (可根据实际情况调整)
-          speed_limit: 10
+          if [ "$RECORD_ID" == "null" ] || [ -z "$RECORD_ID" ]; then
+            echo "❌ 错误: 找不到域名 $DOMAIN 的 A 记录。"
+            echo "请务必先在 Cloudflare 后台手动为 $DOMAIN 添加一个 A 记录 (IP 随便填，例如 1.1.1.1)，脚本才能修改它。"
+            echo "API 返回信息: $RECORD_INFO"
+            exit 1
+          fi
           
-          # 一次选几个 IP 更新上去？建议 1-2 个
-          max_ip: 1
+          echo "📝 找到记录 ID: $RECORD_ID，正在更新为 $BEST_IP ..."
+          
+          # 2. 发送 PUT 请求更新 IP
+          # 注意: proxied: false 代表关闭小黄云 (CDN)，只用作 DNS 解析，这对优选 IP 至关重要
+          UPDATE_RESULT=$(curl -s -X PUT "https://api.cloudflare.com/client/v4/zones/$CF_ZONE_ID/dns_records/$RECORD_ID" \
+            -H "Authorization: Bearer $CF_API_TOKEN" \
+            -H "Content-Type: application/json" \
+            --data "{\"type\":\"A\",\"name\":\"$DOMAIN\",\"content\":\"$BEST_IP\",\"ttl\":60,\"proxied\":false}")
+          
+          SUCCESS=$(echo "$UPDATE_RESULT" | jq -r '.success')
+          
+          if [ "$SUCCESS" == "true" ]; then
+             echo "🎉 DNS 更新成功! 域名: $DOMAIN -> 新IP: $BEST_IP"
+          else
+             echo "❌ 更新失败，API 返回错误:"
+             echo "$UPDATE_RESULT"
+             exit 1
+          fi
