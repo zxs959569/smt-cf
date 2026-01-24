@@ -1,0 +1,34 @@
+name: Cloudflare 优选IP自动更新
+
+on:
+  schedule:
+    - cron: '0 */4 * * *'  # 每4小时运行一次 (UTC时间)
+  workflow_dispatch:       # 允许手动点击运行
+
+jobs:
+  update-dns:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v3
+
+      - name: 测速并更新 DNS
+        # 这里使用一个通用的测速 Action，你也可以换成其他的
+        uses: mack-a/v2ray-agent/gh-action/cf-speedtest@master
+        with:
+          # 必填：从 Secrets 读取 Token
+          api_token: ${{ secrets.CF_API_TOKEN }}
+          # 必填：从 Secrets 读取 Zone ID
+          zone_id: ${{ secrets.CF_ZONE_ID }}
+          
+          # 你的完整域名 (要更新 A 记录的那个)
+          domain: "smt.zxs.cc.cd"
+          
+          # 记录类型
+          record_type: "A"
+          
+          # 筛选参数：只选下载速度 > 10MB/s 的 IP (可根据实际情况调整)
+          speed_limit: 10
+          
+          # 一次选几个 IP 更新上去？建议 1-2 个
+          max_ip: 1
