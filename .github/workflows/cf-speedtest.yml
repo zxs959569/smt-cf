@@ -15,13 +15,11 @@ jobs:
           cd cf_st
           echo "🚀 正在获取 CloudflareSpeedTest 最新版本..."
 
-          # --- 核心修改：动态获取最新下载链接，不再写死版本号 ---
-          # 1. 请求 GitHub API 获取 latest release 信息
-          # 2. 筛选出包含 linux_amd64.tar.gz 的下载地址
+          # 获取最新下载链接
           LATEST_URL=$(curl -sL https://api.github.com/repos/XIU2/CloudflareSpeedTest/releases/latest | grep "browser_download_url" | grep "linux_amd64.tar.gz" | head -n 1 | cut -d '"' -f 4)
 
           if [ -z "$LATEST_URL" ]; then
-            echo "❌ 错误：无法获取下载链接，可能是 GitHub API 限制或仓库结构变更。"
+            echo "❌ 错误：无法获取下载链接。"
             exit 1
           fi
 
@@ -30,6 +28,14 @@ jobs:
           
           # 解压
           tar -zxf cf_speedtest.tar.gz
+          
+          # --- 🔴 修复核心：文件名适配 ---
+          # v2.3.4+ 版本解压出来的文件名是 cfst_linux_amd64，我们需要把它重命名为 CloudflareSpeedTest
+          if [ -f "cfst_linux_amd64" ]; then
+            mv cfst_linux_amd64 CloudflareSpeedTest
+          fi
+          
+          # 再次给权限，确保万无一失
           chmod +x CloudflareSpeedTest
           
           echo "🚀 开始测速..."
@@ -60,7 +66,6 @@ jobs:
 
           echo "🔍 查询域名 $DOMAIN 的 DNS 记录..."
           
-          # 获取 Record ID
           RECORD_INFO=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones/$CF_ZONE_ID/dns_records?name=$DOMAIN&type=A" \
             -H "Authorization: Bearer $CF_API_TOKEN" \
             -H "Content-Type: application/json")
@@ -75,7 +80,6 @@ jobs:
           
           echo "📝 更新记录 ID: $RECORD_ID -> IP: $BEST_IP"
           
-          # 更新 DNS (proxied: false 确保是直连优选)
           UPDATE_RESULT=$(curl -s -X PUT "https://api.cloudflare.com/client/v4/zones/$CF_ZONE_ID/dns_records/$RECORD_ID" \
             -H "Authorization: Bearer $CF_API_TOKEN" \
             -H "Content-Type: application/json" \
