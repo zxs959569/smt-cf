@@ -5,6 +5,8 @@ on:
     paths:
       - 'ip.txt'  # 监听 ip.txt 变动
   workflow_dispatch: # 允许手动触发
+  repository_dispatch:    # 【新增】允许 Worker 远程触发
+    types: [trigger-speedtest]
 
 jobs:
   filter-and-update:
