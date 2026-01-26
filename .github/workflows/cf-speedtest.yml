@@ -1,102 +1,96 @@
-name: 本地优选IP上传+自动筛选更新
+name: 集群优选IP自动更新 (旗舰版)
 
 on:
-  push:
-    paths:
-      - 'ip.txt'  # 监听 ip.txt 变动
-  workflow_dispatch: # 允许手动触发
-  repository_dispatch:    # 【新增】允许 Worker 远程触发
+  schedule:
+    - cron: '0 */4 * * *' # 每4小时自动跑一次
+  workflow_dispatch:      # 允许手动触发
+  repository_dispatch:    # 允许 Worker 故障触发
     types: [trigger-speedtest]
 
 jobs:
-  filter-and-update:
+  speedtest-and-update-cluster:
     runs-on: ubuntu-latest
     steps:
-      - name: 1. 检出代码
-        uses: actions/checkout@v3
-
-      - name: 2. 轮询筛选最佳 IP (关键步骤)
-        id: pick_ip
-        env:
-          # 你的优选域名 (用于验证 Worker 是否响应)
-          DOMAIN: "smt.zxs.cc.cd" 
+      - name: 1. 下载并运行 CloudflareSpeedTest (真·测速)
         run: |
-          if [ ! -f "ip.txt" ]; then
-            echo "❌ 错误：未找到 ip.txt 文件"
+          mkdir -p cf_st
+          cd cf_st
+          echo "🚀 下载官方测速工具..."
+          # 下载 CloudflareSpeedTest v2.2.5 (稳定版)
+          wget -O cf_speedtest.tar.gz https://github.com/XIU2/CloudflareSpeedTest/releases/download/v2.2.5/CloudflareSpeedTest_linux_amd64.tar.gz
+          tar -zxf cf_speedtest.tar.gz
+          chmod +x CloudflareSpeedTest
+          
+          echo "🚀 开始进行全网测速 (目标: 晚高峰不卡)..."
+          # 参数解释:
+          # -p 10: 显示最快的前10个
+          # -dn 5: 下载测速数量 (数值越大越准，但越慢)
+          # -tl 250: 延迟上限 250ms，超过的不要
+          # -t 5: 测速次数
+          ./CloudflareSpeedTest -p 10 -dn 5 -tl 250 -t 5 -o result.csv
+
+          if [ ! -f "result.csv" ]; then
+            echo "❌ 测速失败，未生成结果文件"
             exit 1
           fi
-
-          echo "🚀 开始从 ip.txt 中轮询筛选可用 IP..."
           
-          # 创建一个变量存储最终找到的 IP
-          FOUND_IP=""
-
-          # 读取 ip.txt 的每一行 (假设每行一个 IP)
-          while IFS= read -r IP || [ -n "$IP" ]; do
-            # 去除可能存在的空白字符
-            IP=$(echo "$IP" | xargs)
-            if [ -z "$IP" ]; then continue; fi
-
-            echo "------------------------------------------------"
-            echo "🔍 正在测试 IP: $IP"
-
-            # --- 核心筛选逻辑 ---
-            # 1. 使用 curl 强制把域名解析到当前测试的 IP (--resolve)
-            # 2. 设置连接超时 2秒 (--connect-timeout 2) -> 超过2秒没连上就算“慢”，跳过
-            # 3. 设置总超时 5秒 (--max-time 5)
-            # 4. 检查 HTTP 状态码是否为 200 (-w "%{http_code}")
-            # 5. 访问 Worker 根目录，预期返回 200
-            
-            HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
-              --connect-timeout 2 \
-              --max-time 5 \
-              --resolve $DOMAIN:443:$IP \
-              "https://$DOMAIN/")
-
-            if [ "$HTTP_CODE" == "200" ]; then
-              echo "✅ IP $IP 响应极快 (状态码 200)，选中！"
-              FOUND_IP=$IP
-              break  # 找到了就跳出循环，不再测后面的
-            else
-              echo "⚠️ IP $IP 响应慢或失败 (状态码: $HTTP_CODE)，轮询下一个..."
-            fi
-          done < ip.txt
-
-          # 检查是否找到了有效 IP
-          if [ -z "$FOUND_IP" ]; then
-            echo "❌ 悲剧了：列表里所有 IP 在 GitHub 端测试都失败或超时。"
-            # 可选策略：如果都挂了，强制使用列表第一个做保底
-            echo "⚠️ 启用保底策略：强制使用列表第一个 IP。"
-            FOUND_IP=$(head -n 1 ip.txt | xargs)
+          # 提取第一行（最快）的 IP
+          BEST_IP=$(sed -n '2p' result.csv | cut -d, -f1)
+          
+          if [ -z "$BEST_IP" ]; then
+            echo "⚠️ 没找到满足条件的 IP (可能网络环境太差)，本次不更新"
+            exit 0
           fi
+          
+          echo "🎉 测速冠军 IP: $BEST_IP"
+          echo "BEST_IP=$BEST_IP" >> $GITHUB_ENV
 
-          echo "🎉 最终决定使用的 IP: $FOUND_IP"
-          echo "BEST_IP=$FOUND_IP" >> $GITHUB_ENV
-
-      - name: 3. 更新 Cloudflare DNS
+      # --- 核心修复：循环更新所有 3 个节点 ---
+      - name: 2. 批量更新集群 DNS
         env:
-          CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
-          CF_ZONE_ID: ${{ secrets.CF_ZONE_ID }}
-          DOMAIN: "smt.zxs.cc.cd"
+          # 填入之前的 Secret (多账号支持)
+          CF_TOKEN_A: ${{ secrets.CF_TOKEN_A }}
+          CF_ZONE_A: ${{ secrets.CF_ZONE_A }}
+          CF_TOKEN_B: ${{ secrets.CF_TOKEN_B }}
+          CF_ZONE_B: ${{ secrets.CF_ZONE_B }}
+          CF_TOKEN_C: ${{ secrets.CF_TOKEN_C }}
+          CF_ZONE_C: ${{ secrets.CF_ZONE_C }}
         run: |
-          echo "📝 正在将 $DOMAIN 更新为 $BEST_IP"
-          
-          # 获取 Record ID
-          RECORD_INFO=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones/$CF_ZONE_ID/dns_records?name=$DOMAIN&type=A" \
-            -H "Authorization: Bearer $CF_API_TOKEN" \
-            -H "Content-Type: application/json")
-          
-          RECORD_ID=$(echo "$RECORD_INFO" | jq -r '.result[0].id')
-          
-          if [ "$RECORD_ID" == "null" ] || [ -z "$RECORD_ID" ]; then
-             echo "❌ 无法获取 DNS 记录 ID，请检查 Cloudflare 设置。"
-             exit 1
-          fi
-
-          # 更新记录
-          UPDATE_RES=$(curl -s -X PUT "https://api.cloudflare.com/client/v4/zones/$CF_ZONE_ID/dns_records/$RECORD_ID" \
-            -H "Authorization: Bearer $CF_API_TOKEN" \
-            -H "Content-Type: application/json" \
-            --data "{\"type\":\"A\",\"name\":\"$DOMAIN\",\"content\":\"$BEST_IP\",\"ttl\":60,\"proxied\":false}")
+          # 定义更新函数
+          update_dns() {
+            local TOKEN=$1
+            local ZONE=$2
+            local DOMAIN=$3
+            local IP=$4
             
-          echo "✅ 更新请求已发送。"
+            echo "------------------------------------------------"
+            echo "🔄 正在更新节点: $DOMAIN -> $IP"
+            
+            # 1. 获取 Record ID
+            RECORD_ID=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones/$ZONE/dns_records?name=$DOMAIN&type=A" \
+              -H "Authorization: Bearer $TOKEN" \
+              -H "Content-Type: application/json" | jq -r '.result[0].id')
+            
+            if [ "$RECORD_ID" == "null" ] || [ -z "$RECORD_ID" ]; then
+              echo "⚠️ 找不到 A 记录，跳过: $DOMAIN"
+              return
+            fi
+            
+            # 2. 推送更新
+            UPDATE_RES=$(curl -s -X PUT "https://api.cloudflare.com/client/v4/zones/$ZONE/dns_records/$RECORD_ID" \
+              -H "Authorization: Bearer $TOKEN" \
+              -H "Content-Type: application/json" \
+              --data "{\"type\":\"A\",\"name\":\"$DOMAIN\",\"content\":\"$IP\",\"ttl\":60,\"proxied\":false}")
+            
+            SUCCESS=$(echo "$UPDATE_RES" | jq -r '.success')
+            if [ "$SUCCESS" == "true" ]; then
+               echo "✅ 更新成功！"
+            else
+               echo "❌ 更新失败: $(echo $UPDATE_RES | jq -r '.errors[0].message')"
+            fi
+          }
+
+          # 执行更新 (分别传入对应的 Token, ZoneID, 域名, IP)
+          update_dns "$CF_TOKEN_A" "$CF_ZONE_A" "smt.zxs.cc.cd" "$BEST_IP"
+          update_dns "$CF_TOKEN_B" "$CF_ZONE_B" "smt.zdh8.de5.net" "$BEST_IP"
+          update_dns "$CF_TOKEN_C" "$CF_ZONE_C" "smt.cuag.de5.net" "$BEST_IP"
