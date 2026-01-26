@@ -1,10 +1,10 @@
-name: 集群优选IP自动更新 (最终修复版)
+name: 集群优选IP自动更新 (智能修复版)
 
 on:
   schedule:
-    - cron: '0 */4 * * *' # 每4小时执行一次
-  workflow_dispatch:      # 允许手动触发
-  repository_dispatch:    # 允许 Worker 故障触发
+    - cron: '0 */4 * * *'
+  workflow_dispatch:
+  repository_dispatch:
     types: [trigger-speedtest]
 
 jobs:
@@ -15,14 +15,13 @@ jobs:
         run: |
           mkdir -p cf_st
           cd cf_st
-          echo "🚀 正在查询 CloudflareSpeedTest 最新版本..."
+          echo "🚀 正在查询最新版本..."
           
-          # 动态获取最新版本下载链接
+          # 动态获取下载链接
           LATEST_URL=$(curl -sL https://api.github.com/repos/XIU2/CloudflareSpeedTest/releases/latest | grep "browser_download_url" | grep "linux_amd64.tar.gz" | head -n 1 | cut -d '"' -f 4)
           
-          # 如果 API 失败，使用 v2.2.4 稳定版保底
+          # 保底链接
           if [ -z "$LATEST_URL" ]; then
-            echo "⚠️ API 查询失败，使用 v2.2.4 稳定版..."
             LATEST_URL="https://github.com/XIU2/CloudflareSpeedTest/releases/download/v2.2.4/CloudflareSpeedTest_linux_amd64.tar.gz"
           fi
           
@@ -31,33 +30,41 @@ jobs:
           
           # 解压
           tar -zxf cf_speedtest.tar.gz
+          
+          # 【核心修复】不猜文件名了，直接通过文件大小自动识别主程序
+          # 1. 删除压缩包，避免干扰
+          rm cf_speedtest.tar.gz
+          
+          # 2. 找到当前目录下最大的文件 (主程序肯定比 ip.txt 大)
+          MAIN_BIN=$(ls -S | head -n 1)
+          echo "🔎 自动识别到主程序: $MAIN_BIN"
+          
+          # 3. 强制重命名为标准名称
+          mv "$MAIN_BIN" CloudflareSpeedTest
+          
+          # 4. 赋予权限
           chmod +x CloudflareSpeedTest
           
-          echo "🚀 开始测速 (目标: 晚高峰不卡)..."
-          # -p 10: 选最快10个
-          # -dn 5: 下载测速数量
-          # -tl 300: 延迟上限 300ms
-          # -t 5: 测速 5 次取平均值
+          echo "🚀 开始测速..."
           ./CloudflareSpeedTest -p 10 -dn 5 -tl 300 -t 5 -o result.csv
 
           if [ ! -f "result.csv" ]; then
-            echo "❌ 测速失败，未生成结果文件"
+            echo "❌ 测速失败"
             exit 1
           fi
           
           BEST_IP=$(sed -n '2p' result.csv | cut -d, -f1)
           
           if [ -z "$BEST_IP" ]; then
-            echo "⚠️ 没找到满足条件的 IP，本次不更新"
+            echo "⚠️ 没找到好IP"
             exit 0
           fi
           
-          echo "🎉 测速冠军 IP: $BEST_IP"
+          echo "🎉 冠军 IP: $BEST_IP"
           echo "BEST_IP=$BEST_IP" >> $GITHUB_ENV
 
       - name: 2. 批量更新集群 DNS
         env:
-          # 读取 Secrets (确保你在 GitHub 后台配置了这 6 个变量)
           CF_TOKEN_A: ${{ secrets.CF_TOKEN_A }}
           CF_ZONE_A: ${{ secrets.CF_ZONE_A }}
           CF_TOKEN_B: ${{ secrets.CF_TOKEN_B }}
@@ -65,46 +72,35 @@ jobs:
           CF_TOKEN_C: ${{ secrets.CF_TOKEN_C }}
           CF_ZONE_C: ${{ secrets.CF_ZONE_C }}
         run: |
-          # 定义更新函数
           update_dns() {
             local TOKEN=$1
             local ZONE=$2
             local DOMAIN=$3
             local IP=$4
             
-            echo "------------------------------------------------"
-            echo "🔄 正在更新节点: $DOMAIN -> $IP"
+            if [ -z "$TOKEN" ]; then echo "⚠️ 跳过 $DOMAIN (未配置 Secret)"; return; fi
             
-            if [ -z "$TOKEN" ] || [ -z "$ZONE" ]; then
-                echo "⚠️ 跳过: Secret 未配置"
-                return
-            fi
-
-            # 1. 获取 Record ID
+            echo "🔄 更新 $DOMAIN -> $IP"
+            
+            # 获取 ID
             RECORD_ID=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones/$ZONE/dns_records?name=$DOMAIN&type=A" \
               -H "Authorization: Bearer $TOKEN" \
               -H "Content-Type: application/json" | jq -r '.result[0].id')
             
             if [ "$RECORD_ID" == "null" ] || [ -z "$RECORD_ID" ]; then
-              echo "⚠️ 找不到 A 记录，跳过: $DOMAIN"
+              echo "⚠️ 找不到记录: $DOMAIN"
               return
             fi
             
-            # 2. 推送更新
-            UPDATE_RES=$(curl -s -X PUT "https://api.cloudflare.com/client/v4/zones/$ZONE/dns_records/$RECORD_ID" \
+            # 推送
+            curl -s -X PUT "https://api.cloudflare.com/client/v4/zones/$ZONE/dns_records/$RECORD_ID" \
               -H "Authorization: Bearer $TOKEN" \
               -H "Content-Type: application/json" \
-              --data "{\"type\":\"A\",\"name\":\"$DOMAIN\",\"content\":\"$IP\",\"ttl\":60,\"proxied\":false}")
+              --data "{\"type\":\"A\",\"name\":\"$DOMAIN\",\"content\":\"$IP\",\"ttl\":60,\"proxied\":false}" > /dev/null
             
-            SUCCESS=$(echo "$UPDATE_RES" | jq -r '.success')
-            if [ "$SUCCESS" == "true" ]; then
-               echo "✅ 更新成功！"
-            else
-               echo "❌ 更新失败: $(echo $UPDATE_RES | jq -r '.errors[0].message')"
-            fi
+            echo "✅ 完成"
           }
 
-          # 执行 3 次更新
           update_dns "$CF_TOKEN_A" "$CF_ZONE_A" "smt.zxs.cc.cd" "$BEST_IP"
           update_dns "$CF_TOKEN_B" "$CF_ZONE_B" "smt.zdh8.de5.net" "$BEST_IP"
           update_dns "$CF_TOKEN_C" "$CF_ZONE_C" "smt.cuag.de5.net" "$BEST_IP"
