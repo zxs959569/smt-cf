@@ -1,15 +1,28 @@
-- name: 1. 下载并运行 CloudflareSpeedTest (自动获取最新版)
+name: 集群优选IP自动更新 (最终修复版)
+
+on:
+  schedule:
+    - cron: '0 */4 * * *' # 每4小时执行一次
+  workflow_dispatch:      # 允许手动触发
+  repository_dispatch:    # 允许 Worker 故障触发
+    types: [trigger-speedtest]
+
+jobs:
+  speedtest-and-update-cluster:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 1. 下载并运行 CloudflareSpeedTest
         run: |
           mkdir -p cf_st
           cd cf_st
           echo "🚀 正在查询 CloudflareSpeedTest 最新版本..."
           
-          # 【核心修复】使用 API 动态获取最新下载链接，而不是写死 v2.2.5
+          # 动态获取最新版本下载链接
           LATEST_URL=$(curl -sL https://api.github.com/repos/XIU2/CloudflareSpeedTest/releases/latest | grep "browser_download_url" | grep "linux_amd64.tar.gz" | head -n 1 | cut -d '"' -f 4)
           
-          # 如果获取失败（比如 API 限制），则使用固定的 v2.2.4 稳定版作为保底
+          # 如果 API 失败，使用 v2.2.4 稳定版保底
           if [ -z "$LATEST_URL" ]; then
-            echo "⚠️ API 查询失败，使用 v2.2.4 稳定版作为备选..."
+            echo "⚠️ API 查询失败，使用 v2.2.4 稳定版..."
             LATEST_URL="https://github.com/XIU2/CloudflareSpeedTest/releases/download/v2.2.4/CloudflareSpeedTest_linux_amd64.tar.gz"
           fi
           
@@ -20,10 +33,10 @@
           tar -zxf cf_speedtest.tar.gz
           chmod +x CloudflareSpeedTest
           
-          echo "🚀 开始进行全网测速 (目标: 晚高峰不卡)..."
+          echo "🚀 开始测速 (目标: 晚高峰不卡)..."
           # -p 10: 选最快10个
           # -dn 5: 下载测速数量
-          # -tl 300: 稍微放宽延迟到 300ms，避免晚高峰找不到 IP
+          # -tl 300: 延迟上限 300ms
           # -t 5: 测速 5 次取平均值
           ./CloudflareSpeedTest -p 10 -dn 5 -tl 300 -t 5 -o result.csv
 
@@ -41,3 +54,57 @@
           
           echo "🎉 测速冠军 IP: $BEST_IP"
           echo "BEST_IP=$BEST_IP" >> $GITHUB_ENV
+
+      - name: 2. 批量更新集群 DNS
+        env:
+          # 读取 Secrets (确保你在 GitHub 后台配置了这 6 个变量)
+          CF_TOKEN_A: ${{ secrets.CF_TOKEN_A }}
+          CF_ZONE_A: ${{ secrets.CF_ZONE_A }}
+          CF_TOKEN_B: ${{ secrets.CF_TOKEN_B }}
+          CF_ZONE_B: ${{ secrets.CF_ZONE_B }}
+          CF_TOKEN_C: ${{ secrets.CF_TOKEN_C }}
+          CF_ZONE_C: ${{ secrets.CF_ZONE_C }}
+        run: |
+          # 定义更新函数
+          update_dns() {
+            local TOKEN=$1
+            local ZONE=$2
+            local DOMAIN=$3
+            local IP=$4
+            
+            echo "------------------------------------------------"
+            echo "🔄 正在更新节点: $DOMAIN -> $IP"
+            
+            if [ -z "$TOKEN" ] || [ -z "$ZONE" ]; then
+                echo "⚠️ 跳过: Secret 未配置"
+                return
+            fi
+
+            # 1. 获取 Record ID
+            RECORD_ID=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones/$ZONE/dns_records?name=$DOMAIN&type=A" \
+              -H "Authorization: Bearer $TOKEN" \
+              -H "Content-Type: application/json" | jq -r '.result[0].id')
+            
+            if [ "$RECORD_ID" == "null" ] || [ -z "$RECORD_ID" ]; then
+              echo "⚠️ 找不到 A 记录，跳过: $DOMAIN"
+              return
+            fi
+            
+            # 2. 推送更新
+            UPDATE_RES=$(curl -s -X PUT "https://api.cloudflare.com/client/v4/zones/$ZONE/dns_records/$RECORD_ID" \
+              -H "Authorization: Bearer $TOKEN" \
+              -H "Content-Type: application/json" \
+              --data "{\"type\":\"A\",\"name\":\"$DOMAIN\",\"content\":\"$IP\",\"ttl\":60,\"proxied\":false}")
+            
+            SUCCESS=$(echo "$UPDATE_RES" | jq -r '.success')
+            if [ "$SUCCESS" == "true" ]; then
+               echo "✅ 更新成功！"
+            else
+               echo "❌ 更新失败: $(echo $UPDATE_RES | jq -r '.errors[0].message')"
+            fi
+          }
+
+          # 执行 3 次更新
+          update_dns "$CF_TOKEN_A" "$CF_ZONE_A" "smt.zxs.cc.cd" "$BEST_IP"
+          update_dns "$CF_TOKEN_B" "$CF_ZONE_B" "smt.zdh8.de5.net" "$BEST_IP"
+          update_dns "$CF_TOKEN_C" "$CF_ZONE_C" "smt.cuag.de5.net" "$BEST_IP"
