@@ -102,5 +102,5 @@ jobs:
           }
 
           update_dns "$CF_TOKEN_A" "$CF_ZONE_A" "smt.zxs.cc.cd" "$BEST_IP"
-          update_dns "$CF_TOKEN_B" "$CF_ZONE_B" "smt.zdh8.de5.net" "$BEST_IP"
+          update_dns "$CF_TOKEN_B" "$CF_ZONE_B" "smt.zdh.cc.cd" "$BEST_IP"
           update_dns "$CF_TOKEN_C" "$CF_ZONE_C" "smt.cuag.de5.net" "$BEST_IP"
